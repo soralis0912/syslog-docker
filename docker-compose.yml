@@ -1,0 +1,77 @@
+# Every service caps its own stdout. A syslog box that fills the disk with its
+# own container log is a classic own goal.
+x-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  rsyslog:
+    build:
+      context: ./config/rsyslog
+    image: syslog-docker/rsyslog:alpine3.22
+    container_name: rsyslog
+    restart: unless-stopped
+    # host, NOT "-p 514:514/udp". Publishing the port puts docker-proxy/NAT in
+    # the path and rewrites the sender to the bridge gateway (172.x), which
+    # breaks per-device routing and any source ACL. Verified both ways - see
+    # README.
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - TZ=${TZ:-Asia/Tokyo}
+    volumes:
+      - ./config/rsyslog/rsyslog.conf:/etc/rsyslog.conf:ro
+      - ./config/rsyslog/entrypoint.sh:/entrypoint.sh:ro
+      - ${SYSLOG_LOG_DIR:-./data/logs}:/var/log/network:rw
+      - ${SYSLOG_SPOOL_DIR:-./data/spool}:/var/spool/rsyslog:rw
+    logging: *json-logging
+
+  alloy:
+    image: grafana/alloy:v1.18.1
+    container_name: syslog-alloy
+    restart: unless-stopped
+    # host netns so it can reach Loki on 127.0.0.1, which is the only address
+    # Loki is published on.
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - TZ=${TZ:-Asia/Tokyo}
+      - LOKI_PUSH_URL=${LOKI_PUSH_URL:-http://127.0.0.1:3100/loki/api/v1/push}
+    volumes:
+      - ./config/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - ${SYSLOG_LOG_DIR:-./data/logs}:/var/log/network:ro
+      # Read positions survive restarts; without this a restart replays every
+      # file from the beginning.
+      - ${ALLOY_DATA_DIR:-./data/alloy}:/var/lib/alloy/data:rw
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+      # Sharing the host netns means the default 0.0.0.0:12345 would be on the
+      # LAN.
+      - --server.http.listen-addr=127.0.0.1:12345
+    depends_on:
+      - rsyslog
+    logging: *json-logging
+
+  retention:
+    build:
+      context: ./config/retention
+    image: syslog-docker/retention:alpine3.22
+    container_name: syslog-retention
+    restart: unless-stopped
+    # Touches nothing but the log directory.
+    network_mode: none
+    env_file:
+      - .env
+    environment:
+      - TZ=${TZ:-Asia/Tokyo}
+    volumes:
+      - ./config/retention/retention.sh:/retention.sh:ro
+      - ./config/retention/entrypoint.sh:/entrypoint.sh:ro
+      - ${SYSLOG_LOG_DIR:-./data/logs}:/var/log/network:rw
+    logging: *json-logging

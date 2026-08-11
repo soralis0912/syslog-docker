@@ -1,0 +1,82 @@
+// Tails the files rsyslog writes and ships them to Loki.
+//
+// Alloy runs in the host network namespace because Loki is published on
+// 127.0.0.1 only - it is never exposed on the LAN.
+
+logging {
+  level  = "warn"
+  format = "logfmt"
+}
+
+local.file_match "network" {
+  path_targets = [{
+    __path__ = "/var/log/network/*/*.log",
+    // Belt and braces: the glob already excludes them, but a compressed file
+    // must never be handed to the tailer.
+    __path_exclude__ = "/var/log/network/*/*.zst",
+  }]
+  sync_period = "15s"
+}
+
+loki.source.file "network" {
+  targets       = local.file_match.network.targets
+  forward_to    = [loki.process.network.receiver]
+  tail_from_end = false
+}
+
+loki.process "network" {
+  // rsyslog writes a JSON envelope; the device's own payload is in "message".
+  stage.json {
+    expressions = {
+      recv_time = "recv_time",
+      device    = "device",
+      severity  = "severity",
+      src_ip    = "src_ip",
+      message   = "message",
+    }
+  }
+
+  // Index on the receiver's clock. A sender left on a foreign timezone would
+  // otherwise scatter its events hours away from everything else.
+  stage.timestamp {
+    source = "recv_time"
+    format = "RFC3339"
+  }
+
+  stage.labels {
+    values = {
+      device   = "device",
+      severity = "severity",
+    }
+  }
+
+  // Searchable without being part of the stream identity.
+  stage.structured_metadata {
+    values = {
+      src_ip = "src_ip",
+    }
+  }
+
+  // A per-day filename would mint a fresh stream every midnight for no gain -
+  // the day is already in the timestamp.
+  stage.label_drop {
+    values = ["filename"]
+  }
+
+  // Store the device's line, not our envelope, so `| json` / `| logfmt` at
+  // query time sees the device fields directly.
+  stage.output {
+    source = "message"
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = sys.env("LOKI_PUSH_URL")
+  }
+  external_labels = {
+    job = "syslog",
+  }
+}

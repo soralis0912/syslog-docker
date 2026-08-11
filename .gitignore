@@ -1,0 +1,4 @@
+data/
+.env
+# Per-deployment rollback notes: real addresses and the captured prior config.
+ROLLBACK.local.md
