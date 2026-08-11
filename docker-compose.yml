@@ -33,14 +33,17 @@ services:
     image: grafana/alloy:v1.18.1
     container_name: syslog-alloy
     restart: unless-stopped
-    # host netns so it can reach Loki on 127.0.0.1, which is the only address
-    # Loki is published on.
-    network_mode: host
+    # Joins the metrics stack's network instead of the host's: it reaches Loki
+    # as loki:3100, and Prometheus can scrape it back as syslog-alloy:12345,
+    # which turns "are we still receiving" into a metric rather than something
+    # you only notice by looking. Only rsyslog needs the host namespace.
+    networks:
+      - metrics
     env_file:
       - .env
     environment:
       - TZ=${TZ:-Asia/Tokyo}
-      - LOKI_PUSH_URL=${LOKI_PUSH_URL:-http://127.0.0.1:3100/loki/api/v1/push}
+      - LOKI_PUSH_URL=${LOKI_PUSH_URL:-http://loki:3100/loki/api/v1/push}
     volumes:
       - ./config/alloy/config.alloy:/etc/alloy/config.alloy:ro
       - ${SYSLOG_LOG_DIR:-./data/logs}:/var/log/network:ro
@@ -51,9 +54,9 @@ services:
       - run
       - /etc/alloy/config.alloy
       - --storage.path=/var/lib/alloy/data
-      # Sharing the host netns means the default 0.0.0.0:12345 would be on the
-      # LAN.
-      - --server.http.listen-addr=127.0.0.1:12345
+      # Reachable on the metrics bridge network only - that network is not
+      # routed from the LAN and no port is published.
+      - --server.http.listen-addr=0.0.0.0:12345
     depends_on:
       - rsyslog
     logging: *json-logging
@@ -75,3 +78,10 @@ services:
       - ./config/retention/entrypoint.sh:/entrypoint.sh:ro
       - ${SYSLOG_LOG_DIR:-./data/logs}:/var/log/network:rw
     logging: *json-logging
+
+networks:
+  # Created by the metrics stack, joined here. Declared external so neither
+  # project's `compose down` takes the other's networking with it.
+  metrics:
+    external: true
+    name: ${METRICS_NETWORK:-prometheus-docker_default}

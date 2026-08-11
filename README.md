@@ -9,12 +9,19 @@ its own evidence with it. The whole point is that the log survives the device.
 
 ```
 device --UDP/514--> [ rsyslog ] --files--> [ Alloy ] --push--> [ Loki ] --> Grafana
-                         |                                       ^
-                         +--> data/logs/<device>/<YYYY-MM-DD>.log |
-                                    |                             |
-                               [ retention ] zstd + delete        |
-                               (14d local)          long tail (90d)
+                    host netns   |         bridge                ^
+                                 +--> data/logs/<dev>/<date>.log |
+                                       |                         |
+                                  [ retention ] zstd + delete    |
+                                  (14d local)      long tail (90d)
+
+                                 [ Prometheus ] --scrapes--> Alloy, Loki
 ```
+
+Only rsyslog needs the host network namespace. Alloy sits on the metrics
+stack's bridge network, which buys two things: it reaches Loki by service name,
+and Prometheus can scrape it back - so "are we still receiving" becomes a
+metric with history instead of something you notice by opening a log panel.
 
 Addresses in this README use the RFC 5737 documentation range
 (`192.0.2.0/24`). Real ones live in `.env`, which is not tracked.
@@ -211,6 +218,43 @@ diagnose test application syslogd 1                       # server state, drop c
 diagnose sniffer packet any 'udp and port 514' 4 8 a      # is it actually sending
 diagnose log test                                         # generate test events
 ```
+
+## Wiring it to a metrics stack
+
+`docker-compose.yml` declares the metrics network as **external**, so neither
+project's `compose down` takes the other's networking with it:
+
+```yaml
+networks:
+  metrics:
+    external: true
+    name: ${METRICS_NETWORK:-prometheus-docker_default}
+```
+
+Point `METRICS_NETWORK` at whatever that project's network is called
+(`docker network ls`) and `LOKI_PUSH_URL` at the service name.
+
+Scrape Alloy from Prometheus to get pipeline health as metrics:
+
+```yaml
+  - job_name: 'syslog-alloy'
+    static_configs:
+      - targets: ['syslog-alloy:12345']
+```
+
+The series worth keeping:
+
+| metric | reads as |
+|---|---|
+| `loki_source_file_read_lines_total` | lines picked up off disk - flat means silence |
+| `loki_write_sent_entries_total` | lines that reached Loki |
+| `loki_write_dropped_entries_total` | **data that hit disk and died in transit** - the one loss mode the file buffer does not cover |
+| `loki_source_file_files_active_total` | files being tailed; should be one per active device |
+
+**Standalone (no metrics stack):** drop the `networks:` block, give Alloy
+`network_mode: host`, and set
+`LOKI_PUSH_URL=http://127.0.0.1:3100/loki/api/v1/push` against a Loki that
+publishes on loopback.
 
 ## Dashboard
 
