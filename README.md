@@ -180,6 +180,33 @@ inner fields line up - but it introduces a discontinuity in existing logs, so
 it is a change to make deliberately rather than as a side effect of adding
 syslog.
 
+## Log files carry credentials
+
+Device logs contain more than the device's name suggests. A FortiGate records
+the presented community **verbatim** in its `SNMP query failed` event, so a
+single probe with the wrong community writes a working credential into that
+day's file - and from there into Loki, and into anything with read access to
+either.
+
+Files are created `0640` and directories `0750` for that reason. Two habits
+follow from it:
+
+- Treat `data/logs/` as credential-bearing. It is not a place to hand out read
+  access casually.
+- After any authentication failure against a monitored device, assume the
+  secret is in the log and rotate it. Redacting the file is hygiene; rotation
+  is the fix.
+
+To check before granting access to anything downstream:
+
+```
+grep -rl -f /path/to/secrets.pat data/logs/
+```
+
+Editing a file Alloy is still tailing must preserve byte offsets, or the tailer
+resumes at the wrong place. Replace the secret with a same-length placeholder
+rather than deleting it.
+
 ## Adding a device
 
 1. Append to `SYSLOG_DEVICES` in `.env`: `<addr>|<name>` (space separated).
